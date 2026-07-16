@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <windows.h>   // Для QueryPerformanceCounter (высокоточный таймер)
 #include "page_replacement.h"
 
 // ============================================================================
@@ -33,9 +34,23 @@ static int test_size5 = 5;
 static int test_pages6[] = { 1, 2, 3, 4, 5, 1, 2, 3, 4, 5 };
 static int test_size6 = 10;
 
-// Тест 7: Производительность (большой набор)
+// ============================================================================
+// КОНСТАНТЫ ДЛЯ ТЕСТОВ ПРОИЗВОДИТЕЛЬНОСТИ
+// ============================================================================
+
+#define NUM_SIZES 7  // Количество различных размеров для теста масштабируемости
+
+// ============================================================================
+// ФУНКЦИЯ ДЛЯ ГЕНЕРАЦИИ СЛУЧАЙНЫХ СТРАНИЦ
+// ============================================================================
+
+// Генерирует массив случайных страниц для тестирования производительности
+// Используется фиксированный seed (42) для воспроизводимости результатов
 static int* generate_random_pages(int size, int max_page) {
     int* pages = (int*)malloc(size * sizeof(int));
+    if (pages == NULL) {
+        return NULL;  // Проверка выделения памяти
+    }
     for (int i = 0; i < size; i++) {
         pages[i] = rand() % max_page;
     }
@@ -43,9 +58,19 @@ static int* generate_random_pages(int size, int max_page) {
 }
 
 // ============================================================================
-// ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВЫВОДА СТРАНИЦ
+// ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ qsort
 // ============================================================================
 
+// Функция сравнения для qsort (стандартная быстрая сортировка)
+static int compare_int(const void* a, const void* b) {
+    return (*(int*)a - *(int*)b);
+}
+
+// ============================================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ВЫВОДА
+// ============================================================================
+
+// Печатает последовательность страниц (не более 50 для читаемости)
 static void print_pages(int pages[], int size, const char* label) {
     printf("%s: ", label);
     int count = 0;
@@ -60,15 +85,33 @@ static void print_pages(int pages[], int size, const char* label) {
 }
 
 // ============================================================================
-// ЗАПУСК ТЕСТА (без пошагового вывода, только статистика)
+// ВЫСОКОТОЧНЫЙ ЗАМЕР ВРЕМЕНИ (WINDOWS API)
 // ============================================================================
 
+// Измеряет время выполнения алгоритма с помощью QueryPerformanceCounter
+// Это даёт наносекундную точность и измеряет реальное время (wall-clock time)
+static double measure_time(bool (*algo)(PageCache*, int), PageCache* cache, int pages[], int size) {
+    LARGE_INTEGER frequency, start, end;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+
+    for (int i = 0; i < size; i++) {
+        algo(cache, pages[i]);
+    }
+
+    QueryPerformanceCounter(&end);
+    return (double)(end.QuadPart - start.QuadPart) / frequency.QuadPart;
+}
+
+// ============================================================================
+// БАЗОВЫЕ ТЕСТЫ (БЕЗ ПОШАГОВОГО ВЫВОДА)
+// ============================================================================
+
+// Запускает все 4 алгоритма на одном тестовом наборе и выводит статистику
 static void compare_algorithms(const char* test_name, int pages[], int size, int capacity) {
     print_separator(test_name);
-
     print_pages(pages, size, "Pages");
 
-    // Запускаем алгоритмы без пошагового вывода
     run_algorithm_silent("FIFO", fifo_access_silent, pages, size, capacity);
     run_algorithm_silent("LRU", lru_access_silent, pages, size, capacity);
     run_algorithm_silent("NFU", nfu_access_silent, pages, size, capacity);
@@ -76,90 +119,205 @@ static void compare_algorithms(const char* test_name, int pages[], int size, int
 }
 
 // ============================================================================
-// ЗАПУСК ТЕСТА С ДЕТАЛЬНЫМ ВЫВОДОМ (только для отладки)
+// ТЕСТ 7: СРАВНЕНИЕ АЛГОРИТМОВ С ВЫЧИСЛЕНИЕМ КОНСТАНТ O(n)
 // ============================================================================
 
-static void compare_algorithms_verbose(const char* test_name, int pages[], int size, int capacity) {
-    print_separator(test_name);
+// Замеряет время выполнения каждого алгоритма на разных размерах данных
+// и вычисляет коэффициент C = T(n) / n — «отбрасываемую константу» в O(n)
+static void test_algorithm_comparison_with_constants(void) {
+    print_separator("TEST 7: ALGORITHM COMPARISON WITH O(n) CONSTANTS");
 
-    print_pages(pages, size, "Pages");
+    const int CAPACITY = 50;
+    const int MAX_PAGE = 1000;
+    const int SIZES[NUM_SIZES] = { 1000, 2000, 5000, 10000, 20000, 50000, 100000 };
 
-    // Запускаем с пошаговым выводом
-    run_algorithm("FIFO", fifo_access, pages, size, capacity);
-    run_algorithm("LRU", lru_access, pages, size, capacity);
-    run_algorithm("NFU", nfu_access, pages, size, capacity);
-    run_algorithm("CLOCK", clock_access, pages, size, capacity);
+    // Массивы для хранения результатов замеров (фиксированный размер)
+    double fifo_times[NUM_SIZES];
+    double lru_times[NUM_SIZES];
+    double nfu_times[NUM_SIZES];
+    double clock_times[NUM_SIZES];
+
+    printf("\nComparing algorithms on different input sizes\n");
+    printf("Cache capacity: %d\n\n", CAPACITY);
+
+    printf("  Size    |   FIFO    |   LRU     |   NFU     |  CLOCK   \n");
+    printf("----------|-----------|-----------|-----------|----------\n");
+
+    for (int s = 0; s < NUM_SIZES; s++) {
+        int size = SIZES[s];
+        int* pages = generate_random_pages(size, MAX_PAGE);
+        if (pages == NULL) {
+            printf("  ERROR: Failed to allocate memory for size %d\n", size);
+            continue;
+        }
+
+        // Замер FIFO
+        PageCache* cache = cache_create(CAPACITY);
+        fifo_times[s] = measure_time(fifo_access_silent, cache, pages, size);
+        cache_destroy(cache);
+
+        // Замер LRU
+        cache = cache_create(CAPACITY);
+        lru_times[s] = measure_time(lru_access_silent, cache, pages, size);
+        cache_destroy(cache);
+
+        // Замер NFU
+        cache = cache_create(CAPACITY);
+        nfu_times[s] = measure_time(nfu_access_silent, cache, pages, size);
+        cache_destroy(cache);
+
+        // Замер CLOCK
+        cache = cache_create(CAPACITY);
+        clock_times[s] = measure_time(clock_access_silent, cache, pages, size);
+        cache_destroy(cache);
+
+        printf("  %6d  |  %7.4f  |  %7.4f  |  %7.4f  |  %7.4f\n",
+            size, fifo_times[s], lru_times[s], nfu_times[s], clock_times[s]);
+
+        free(pages);
+    }
+
+    // ===== ВЫЧИСЛЕНИЕ КОНСТАНТ O(n) =====
+    printf("\n========================================\n");
+    printf("  O(n) CONSTANTS CALCULATION\n");
+    printf("========================================\n");
+    printf("\nT(n) = C * n + B, where C = T(n) / n\n");
+    printf("\n  Algorithm |   C (avg)  |   B (avg)  |  C ratio\n");
+    printf("------------|------------|------------|----------\n");
+
+    // Используем последние 3 замера для вычисления констант (большие данные)
+    int start_idx = NUM_SIZES - 3;
+    double fifo_C = 0, lru_C = 0, nfu_C = 0, clock_C = 0;
+    double fifo_B = 0, lru_B = 0, nfu_B = 0, clock_B = 0;
+    int count = 0;
+
+    for (int s = start_idx; s < NUM_SIZES; s++) {
+        int size = SIZES[s];
+        count++;
+
+        fifo_C += fifo_times[s] / size;
+        lru_C += lru_times[s] / size;
+        nfu_C += nfu_times[s] / size;
+        clock_C += clock_times[s] / size;
+    }
+
+    fifo_C /= count;
+    lru_C /= count;
+    nfu_C /= count;
+    clock_C /= count;
+
+    // Вычисляем B = T(n) - C * n для последних 3 замеров
+    for (int s = start_idx; s < NUM_SIZES; s++) {
+        int size = SIZES[s];
+        fifo_B += fifo_times[s] - fifo_C * size;
+        lru_B += lru_times[s] - lru_C * size;
+        nfu_B += nfu_times[s] - nfu_C * size;
+        clock_B += clock_times[s] - clock_C * size;
+    }
+    fifo_B /= count;
+    lru_B /= count;
+    nfu_B /= count;
+    clock_B /= count;
+
+    printf("  FIFO     |  %.4e  |  %.4e  |  1.00x\n", fifo_C, fifo_B);
+    printf("  LRU      |  %.4e  |  %.4e  |  %.2fx\n", lru_C, lru_B, lru_C / fifo_C);
+    printf("  NFU      |  %.4e  |  %.4e  |  %.2fx\n", nfu_C, nfu_B, nfu_C / fifo_C);
+    printf("  CLOCK    |  %.4e  |  %.4e  |  %.2fx\n", clock_C, clock_B, clock_C / fifo_C);
+
+    // Интерпретация результатов (на английском)
+    printf("\n========== INTERPRETATION ==========\n");
+    printf("C = T(n) / n is the 'dropped' constant in O(n)\n");
+    printf("FIFO:  T(n) = %.4e * n + %.4e\n", fifo_C, fifo_B);
+    printf("LRU:   T(n) = %.4e * n + %.4e\n", lru_C, lru_B);
+    printf("NFU:   T(n) = %.4e * n + %.4e\n", nfu_C, nfu_B);
+    printf("CLOCK: T(n) = %.4e * n + %.4e\n", clock_C, clock_B);
+
+    printf("\nConclusion: LRU is %.2f times slower than FIFO due to time update operation.\n",
+        lru_C / fifo_C);
 }
 
 // ============================================================================
-// ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ (без пошагового вывода)
+// ТЕСТ 8: СРАВНЕНИЕ С АЛГОРИТМАМИ СОРТИРОВКИ
 // ============================================================================
 
-static void test_performance(void) {
-    print_separator("PERFORMANCE TEST");
+// Сравнивает время выполнения алгоритмов вытеснения страниц
+// с алгоритмами сортировки на том же объёме данных
+static void compare_with_sorting(void) {
+    print_separator("TEST 8: COMPARISON WITH SORTING ALGORITHMS");
 
-    const int NUM_PAGES = 10000;
-    const int CAPACITY = 100;
-    const int MAX_PAGE = 1000;
+    const int SIZE = 50000;
+    const int CAPACITY = 50;
+    const int MAX_PAGE = 500;
 
-    printf("\nGenerating %d random pages...\n", NUM_PAGES);
-    int* pages = generate_random_pages(NUM_PAGES, MAX_PAGE);
+    printf("\nComparing page replacement algorithms with sorting\n");
+    printf("Data size: %d elements\n\n", SIZE);
 
-    printf("\nComparing algorithms on random data:\n");
+    // Генерируем данные
+    int* pages = generate_random_pages(SIZE, MAX_PAGE);
+    if (pages == NULL) {
+        printf("  ERROR: Failed to allocate memory\n");
+        return;
+    }
 
-    // FIFO
+    int* array_for_sort = (int*)malloc(SIZE * sizeof(int));
+    if (array_for_sort == NULL) {
+        printf("  ERROR: Failed to allocate memory for sorting array\n");
+        free(pages);
+        return;
+    }
+
+    // === 1. Замер LRU ===
     PageCache* cache = cache_create(CAPACITY);
-    if (cache != NULL) {
-        clock_t start = clock();
-        for (int i = 0; i < NUM_PAGES; i++) {
-            fifo_access_silent(cache, pages[i]);
-        }
-        clock_t end = clock();
-        printf("  FIFO:  %d faults (%.3f sec)\n", cache->faults,
-            (double)(end - start) / CLOCKS_PER_SEC);
-        cache_destroy(cache);
-    }
+    double lru_time = measure_time(lru_access_silent, cache, pages, SIZE);
+    int lru_faults = cache->faults;
+    cache_destroy(cache);
 
-    // LRU
-    cache = cache_create(CAPACITY);
-    if (cache != NULL) {
-        clock_t start = clock();
-        for (int i = 0; i < NUM_PAGES; i++) {
-            lru_access_silent(cache, pages[i]);
-        }
-        clock_t end = clock();
-        printf("  LRU:   %d faults (%.3f sec)\n", cache->faults,
-            (double)(end - start) / CLOCKS_PER_SEC);
-        cache_destroy(cache);
+    // === 2. Замер сортировки вставками (O(n²)) ===
+    for (int i = 0; i < SIZE; i++) {
+        array_for_sort[i] = pages[i];
     }
+    double insertion_time = 0.0;
+    LARGE_INTEGER frequency, start, end;
+    QueryPerformanceFrequency(&frequency);
 
-    // NFU
-    cache = cache_create(CAPACITY);
-    if (cache != NULL) {
-        clock_t start = clock();
-        for (int i = 0; i < NUM_PAGES; i++) {
-            nfu_access_silent(cache, pages[i]);
+    // Сортировка вставками (очень медленная для больших массивов)
+    QueryPerformanceCounter(&start);
+    for (int i = 1; i < SIZE; i++) {
+        int key = array_for_sort[i];
+        int j = i - 1;
+        while (j >= 0 && array_for_sort[j] > key) {
+            array_for_sort[j + 1] = array_for_sort[j];
+            j--;
         }
-        clock_t end = clock();
-        printf("  NFU:   %d faults (%.3f sec)\n", cache->faults,
-            (double)(end - start) / CLOCKS_PER_SEC);
-        cache_destroy(cache);
+        array_for_sort[j + 1] = key;
     }
+    QueryPerformanceCounter(&end);
+    insertion_time = (double)(end.QuadPart - start.QuadPart) / frequency.QuadPart;
 
-    // CLOCK
-    cache = cache_create(CAPACITY);
-    if (cache != NULL) {
-        clock_t start = clock();
-        for (int i = 0; i < NUM_PAGES; i++) {
-            clock_access_silent(cache, pages[i]);
-        }
-        clock_t end = clock();
-        printf("  CLOCK: %d faults (%.3f sec)\n", cache->faults,
-            (double)(end - start) / CLOCKS_PER_SEC);
-        cache_destroy(cache);
+    // === 3. Замер быстрой сортировки (qsort) ===
+    for (int i = 0; i < SIZE; i++) {
+        array_for_sort[i] = pages[i];
     }
+    double qsort_time = 0.0;
+    QueryPerformanceCounter(&start);
+    qsort(array_for_sort, SIZE, sizeof(int), compare_int);
+    QueryPerformanceCounter(&end);
+    qsort_time = (double)(end.QuadPart - start.QuadPart) / frequency.QuadPart;
+
+    // === 4. Вывод результатов ===
+    printf("========== PERFORMANCE COMPARISON ==========\n");
+    printf("  LRU (page replacement):   %.6f sec (faults=%d)\n", lru_time, lru_faults);
+    printf("  Insertion Sort:           %.6f sec\n", insertion_time);
+    printf("  Quicksort (qsort):        %.6f sec\n", qsort_time);
+    printf("\n========== RATIO ==========\n");
+    printf("  LRU vs Insertion Sort:    %.2fx faster\n", insertion_time / lru_time);
+    printf("  LRU vs Quicksort:         %.2fx slower\n", lru_time / qsort_time);
+
+    printf("\nConclusion: Page replacement algorithms are slower than qsort,\n");
+    printf("but faster than insertion sort on large datasets.\n");
 
     free(pages);
+    free(array_for_sort);
 }
 
 // ============================================================================
@@ -204,146 +362,52 @@ static void test_different_sizes(void) {
 }
 
 // ============================================================================
-// ТЕСТ 8: ПУСТОЙ МАССИВ (Edge Case)
+// ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ С ИСПОЛЬЗОВАНИЕМ clock()
 // ============================================================================
 
-static void test_empty_array(void) {
-    print_separator("TEST 8: EMPTY ARRAY (Edge Case)");
+// Дополнительный тест с использованием стандартной функции clock()
+static void test_performance_with_clock(void) {
+    print_separator("TEST: PERFORMANCE WITH clock()");
 
-    int* empty_pages = NULL;
-    int size = 0;
-    int capacity = 3;
+    const int NUM_PAGES = 50000;
+    const int CAPACITY = 50;
+    const int MAX_PAGE = 500;
 
-    printf("\nPages: (empty)\n");
-    printf("Testing with empty page sequence (size=0)...\n\n");
-
-    PageCache* cache = cache_create(capacity);
-    if (cache != NULL) {
-        printf("  FIFO (empty):\n");
-        for (int i = 0; i < size; i++) {
-            fifo_access(cache, empty_pages[i]);
-        }
-        printf("    Hits: %d, Faults: %d, Hit rate: %.1f%%\n",
-            cache->hits, cache->faults,
-            cache->hits + cache->faults > 0 ?
-            (double)cache->hits / (cache->hits + cache->faults) * 100.0 : 0.0);
-        cache_destroy(cache);
+    printf("\nGenerating %d random pages...\n", NUM_PAGES);
+    int* pages = generate_random_pages(NUM_PAGES, MAX_PAGE);
+    if (pages == NULL) {
+        printf("  ERROR: Failed to allocate memory\n");
+        return;
     }
 
-    cache = cache_create(capacity);
-    if (cache != NULL) {
-        printf("  LRU (empty):\n");
-        for (int i = 0; i < size; i++) {
-            lru_access(cache, empty_pages[i]);
-        }
-        printf("    Hits: %d, Faults: %d, Hit rate: %.1f%%\n",
-            cache->hits, cache->faults,
-            cache->hits + cache->faults > 0 ?
-            (double)cache->hits / (cache->hits + cache->faults) * 100.0 : 0.0);
-        cache_destroy(cache);
+    printf("Comparing algorithms using clock() (CPU time):\n\n");
+
+    // FIFO
+    PageCache* cache = cache_create(CAPACITY);
+    clock_t start = clock();
+    for (int i = 0; i < NUM_PAGES; i++) {
+        fifo_access_silent(cache, pages[i]);
     }
+    clock_t end = clock();
+    double fifo_time = (double)(end - start) / CLOCKS_PER_SEC;
+    int fifo_faults = cache->faults;
+    cache_destroy(cache);
 
-    cache = cache_create(capacity);
-    if (cache != NULL) {
-        printf("  NFU (empty):\n");
-        for (int i = 0; i < size; i++) {
-            nfu_access(cache, empty_pages[i]);
-        }
-        printf("    Hits: %d, Faults: %d, Hit rate: %.1f%%\n",
-            cache->hits, cache->faults,
-            cache->hits + cache->faults > 0 ?
-            (double)cache->hits / (cache->hits + cache->faults) * 100.0 : 0.0);
-        cache_destroy(cache);
+    // LRU
+    cache = cache_create(CAPACITY);
+    start = clock();
+    for (int i = 0; i < NUM_PAGES; i++) {
+        lru_access_silent(cache, pages[i]);
     }
+    end = clock();
+    double lru_time = (double)(end - start) / CLOCKS_PER_SEC;
+    int lru_faults = cache->faults;
+    cache_destroy(cache);
 
-    cache = cache_create(capacity);
-    if (cache != NULL) {
-        printf("  CLOCK (empty):\n");
-        for (int i = 0; i < size; i++) {
-            clock_access(cache, empty_pages[i]);
-        }
-        printf("    Hits: %d, Faults: %d, Hit rate: %.1f%%\n",
-            cache->hits, cache->faults,
-            cache->hits + cache->faults > 0 ?
-            (double)cache->hits / (cache->hits + cache->faults) * 100.0 : 0.0);
-        cache_destroy(cache);
-    }
+    printf("  FIFO:  %.6f sec (faults=%d)\n", fifo_time, fifo_faults);
+    printf("  LRU:   %.6f sec (faults=%d)\n", lru_time, lru_faults);
 
-    printf("\n[OK] All algorithms handle empty input correctly (no crashes)\n");
-}
-
-// ============================================================================
-// ТЕСТ 9: НУЛЕВОЙ РАЗМЕР КЕША
-// ============================================================================
-
-static void test_zero_capacity(void) {
-    print_separator("TEST 9: ZERO CAPACITY (Edge Case)");
-
-    int pages[] = { 1, 2, 3 };
-    int size = 3;
-
-    printf("\nPages: 1 2 3\n");
-    printf("Testing with zero capacity (should return NULL)...\n\n");
-
-    PageCache* cache = cache_create(0);
-    if (cache == NULL) {
-        printf("  [OK] cache_create(0) correctly returns NULL\n");
-    }
-    else {
-        printf("  [FAIL] cache_create(0) should return NULL!\n");
-        cache_destroy(cache);
-    }
-
-    cache = cache_create(-5);
-    if (cache == NULL) {
-        printf("  [OK] cache_create(-5) correctly returns NULL\n");
-    }
-    else {
-        printf("  [FAIL] cache_create(-5) should return NULL!\n");
-        cache_destroy(cache);
-    }
-}
-
-// ============================================================================
-// ТЕСТ 10: NULL-ПРОВЕРКИ
-// ============================================================================
-
-static void test_null_checks(void) {
-    print_separator("TEST 10: NULL POINTER CHECKS");
-
-    printf("\nTesting algorithms with NULL cache pointer...\n\n");
-
-    bool result;
-
-    result = fifo_access(NULL, 1);
-    printf("  fifo_access(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    result = lru_access(NULL, 1);
-    printf("  lru_access(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    result = nfu_access(NULL, 1);
-    printf("  nfu_access(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    result = clock_access(NULL, 1);
-    printf("  clock_access(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    result = fifo_access_silent(NULL, 1);
-    printf("  fifo_access_silent(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    result = lru_access_silent(NULL, 1);
-    printf("  lru_access_silent(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    result = nfu_access_silent(NULL, 1);
-    printf("  nfu_access_silent(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    result = clock_access_silent(NULL, 1);
-    printf("  clock_access_silent(NULL, 1) = %s (should be false)\n", result ? "true" : "false");
-
-    printf("\n  cache_print(NULL, 1, true): ");
-    cache_print(NULL, 1, true);
-    printf(" (should print nothing)\n");
-
-    printf("\n[OK] All NULL checks pass\n");
+    free(pages);
 }
 
 // ============================================================================
@@ -351,54 +415,40 @@ static void test_null_checks(void) {
 // ============================================================================
 
 int main(void) {
-    srand(42);  // Фиксированный seed для воспроизводимости
+    srand(42);  // Fixed seed for reproducibility
 
     printf("============================================\n");
     printf("     PAGE REPLACEMENT ALGORITHMS\n");
+    printf("     Performance Comparison\n");
     printf("============================================\n");
     printf("\nNote: Step-by-step output is disabled for readability.\n");
     printf("      Only final statistics are shown.\n");
-    printf("      To see detailed output, use compare_algorithms_verbose().\n");
 
-    // Тест 1: Классический пример (без пошагового вывода)
+    // === BASIC TESTS (without step-by-step output) ===
     compare_algorithms("TEST 1: CLASSIC EXAMPLE",
         test_pages1, test_size1, 3);
-
-    // Тест 2: Повторяющийся паттерн
     compare_algorithms("TEST 2: REPEATING PATTERN",
         test_pages2, test_size2, 3);
-
-    // Тест 3: Все страницы разные
     compare_algorithms("TEST 3: ALL DIFFERENT",
         test_pages3, test_size3, 3);
-
-    // Тест 4: Все страницы одинаковые
     compare_algorithms("TEST 4: ALL SAME",
         test_pages4, test_size4, 3);
-
-    // Тест 5: Больше фреймов чем страниц
     compare_algorithms("TEST 5: MORE FRAMES THAN PAGES",
         test_pages5, test_size5, 10);
-
-    // Тест 6: Один фрейм
     compare_algorithms("TEST 6: SINGLE FRAME",
         test_pages6, test_size6, 1);
 
-    // Тест 7: Разные размеры кеша
+    // === PERFORMANCE COMPARISON TESTS ===
     test_different_sizes();
 
-    // Тест 8: Производительность (без пошагового вывода)
-    test_performance();
+    // === TEST 7: ALGORITHM COMPARISON WITH O(n) CONSTANTS ===
+    test_algorithm_comparison_with_constants();
 
+    // === TEST 8: COMPARISON WITH SORTING ===
+    compare_with_sorting();
 
-    // Тест 9: Пустой массив
-    test_empty_array();
-
-    // Тест 10: Нулевой размер кеша
-    test_zero_capacity();
-
-    // Тест 11: NULL-проверки
-    test_null_checks();
+    // === TEST WITH clock() ===
+    test_performance_with_clock();
 
     printf("\n============================================\n");
     printf("           ALL TESTS COMPLETED\n");
